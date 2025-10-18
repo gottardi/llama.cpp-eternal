@@ -102,6 +102,9 @@ static bool ggml_op_is_empty(enum ggml_op op) {
     }
 }
 
+static inline float ggml_softplus(float input) {
+    return (input > 20.0f) ? input : logf(1 + expf(input));
+}
 //
 // logging
 //
@@ -342,6 +345,10 @@ struct ggml_cgraph {
 // if you need the gradients, get them from the original graph
 struct ggml_cgraph ggml_graph_view(struct ggml_cgraph * cgraph, int i0, int i1);
 
+// ggml-alloc.c: true if the operation can reuse memory from its sources
+GGML_API bool ggml_op_can_inplace(enum ggml_op op);
+
+
 // Memory allocation
 
 GGML_API void * ggml_aligned_malloc(size_t size);
@@ -558,14 +565,23 @@ static inline ggml_bf16_t ggml_compute_fp32_to_bf16(float s) {
 #define GGML_FP32_TO_BF16(x) ggml_compute_fp32_to_bf16(x)
 #define GGML_BF16_TO_FP32(x) ggml_compute_bf16_to_fp32(x)
 
+static inline int32_t ggml_node_get_use_count(const struct ggml_cgraph * cgraph, int node_idx) {
+    const struct ggml_tensor * node = cgraph->nodes[node_idx];
+
+    size_t hash_pos = ggml_hash_find(&cgraph->visited_hash_set, node);
+    if (!ggml_bitset_get(cgraph->visited_hash_set.used, hash_pos)) {
+        return 0;
+    }
+    return cgraph->use_counts[hash_pos];
+}
+
 // return true if the node's results are only used by N other nodes
 // and can be fused into their calculations.
 static inline bool ggml_node_has_n_uses(const struct ggml_cgraph * cgraph, int node_idx, int32_t n_uses) {
     const struct ggml_tensor * node = cgraph->nodes[node_idx];
 
     // check the use count against how many we're replacing
-    size_t hash_pos = ggml_hash_find(&cgraph->visited_hash_set, node);
-    if (!ggml_bitset_get(cgraph->visited_hash_set.used, hash_pos) || cgraph->use_counts[hash_pos] != n_uses) {
+    if (ggml_node_get_use_count(cgraph, node_idx) != n_uses) {
         return false;
     }
 
