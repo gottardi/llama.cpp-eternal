@@ -69,15 +69,16 @@ static void sigint_handler(int signo) {
             is_interacting  = true;
             need_insert_eot = true;
         } else {
-            console::cleanup();
+            //console::cleanup();            
             LOG("\n");
             common_perf_print(*g_ctx, *g_smpl);
 
             // make sure all logs are flushed
-            LOG("Interrupted by user\n");
-            common_log_pause(common_log_main());
+            //LOG("Interrupted by user\n");
+            //common_log_pause(common_log_main());
 
-            _exit(130);
+            printf("Avoided kill. PID=%i.\n", getpid());
+			//	_exit(130);            
         }
     }
 }

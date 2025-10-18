@@ -53,11 +53,12 @@ static void sigint_handler(int signo) {
         if (g_is_generating) {
             g_is_generating = false;
         } else {
-            console::cleanup();
+            //console::cleanup();
             if (g_is_interrupted) {
-                _exit(1);
+				printf("Avoided kill.\n");
+                //_exit(1);
             }
-            g_is_interrupted = true;
+            //g_is_interrupted = true;
         }
     }
 }
