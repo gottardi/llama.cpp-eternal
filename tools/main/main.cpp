@@ -862,6 +862,7 @@ int main(int argc, char ** argv) {
                 bool another_line = true;
                 do {
                     another_line = console::readline(line, params.multiline_input);
+                    LOG("> %s", line.c_str());
                     buffer += line;
                 } while (another_line);
 
