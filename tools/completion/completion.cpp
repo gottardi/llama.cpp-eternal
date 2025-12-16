@@ -882,16 +882,22 @@ int main(int argc, char ** argv) {
                 console::set_display(DISPLAY_TYPE_RESET);
                 display = true;
 
+		static int break_count(0);
                 if (buffer.empty()) { // Ctrl+D on empty line exits
-                    LOG("EOF by user\n");
+                    //LOG("EOF by user\n");
                     //break;
-                    printf("Avoided break.\n");
-                    if (!path_session.empty() && params.prompt_cache_all && !params.prompt_cache_ro) {
-						LOG("\n%s: saving partial output to session file '%s'\n", __func__, path_session.c_str());
-						llama_state_save_file(ctx, path_session.c_str(), session_tokens.data(), session_tokens.size());
-					}
+                    //printf("Avoided break.\n");
+		    break_count++;
+		    if ((break_count > 5) && !path_session.empty() && params.prompt_cache_all && !params.prompt_cache_ro) {
+			LOG("\n%s: saving partial output to session file '%s'\n", __func__, path_session.c_str());
+			llama_state_save_file(ctx, path_session.c_str(), session_tokens.data(), session_tokens.size());
+			break_count = 0;
+		    }else{
+			console::readline(line, params.multiline_input);
+			buffer += line;
+		    }
                 }
-                else
+
                 {
 
 					if (buffer.back() == '\n') {
