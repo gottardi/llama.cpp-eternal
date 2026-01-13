@@ -78,27 +78,25 @@ namespace ggml_cuda_mma {
         // MIRRORED == Each data value is held exactly once per thread subgroup.
         DATA_LAYOUT_I_MAJOR           =  0, // Always used for Turing, Ampere, Ada Lovelace, consumer Blackwell, matrix A&B for RDNA4 and CDNA.
         DATA_LAYOUT_J_MAJOR           = 10, // Matrix C for CDNA and RDNA4, int and float matrix C for RDNA3.
-        DATA_LAYOUT_I_MAJOR_MIRRORED  = 20,
+        DATA_LAYOUT_I_MAJOR_MIRRORED  = 20, // Volta, matrix A&B for RDNA3.
         DATA_LAYOUT_J_MAJOR_MIRRORED  = 30,
-        DATA_LAYOUT_I_MAJOR_DUAL      = 40, // Matrix A&B for RDNA3.
     };
     // Implemented mma combinations are:
     //   - (I_MAJOR, I_MAJOR)          -> I_MAJOR
     //   - (I_MAJOR, I_MAJOR_MIRRORED) -> I_MAJOR
     //   - (I_MAJOR, J_MAJOR_MIRRORED) -> I_MAJOR
 
-    constexpr bool is_i_major(const data_layout dl) {
+    static constexpr bool is_i_major(const data_layout dl) {
         return dl == DATA_LAYOUT_I_MAJOR ||
-               dl == DATA_LAYOUT_I_MAJOR_MIRRORED ||
-               dl == DATA_LAYOUT_I_MAJOR_DUAL;
+               dl == DATA_LAYOUT_I_MAJOR_MIRRORED;
     }
 
-    constexpr data_layout get_input_data_layout() {
-#if defined(RDNA3)
-        return DATA_LAYOUT_I_MAJOR_DUAL;
+    static constexpr __device__ data_layout get_input_data_layout() {
+#if defined(RDNA3) || __CUDA_ARCH__ == GGML_CUDA_CC_VOLTA
+        return DATA_LAYOUT_I_MAJOR_MIRRORED;
 #else
         return DATA_LAYOUT_I_MAJOR;
-#endif // defined(RDNA3)
+#endif // defined(RDNA3) || __CUDA_ARCH__ == GGML_CUDA_CC_VOLTA
     }
 
     template <int I_, int J_, typename T, data_layout ds_=DATA_LAYOUT_I_MAJOR>
@@ -208,10 +206,16 @@ namespace ggml_cuda_mma {
 
         static __device__ __forceinline__ int get_j(const int l) {
             if constexpr (I == 16 && J == 16) {
-                // matrix C
 #if defined(RDNA3)
-                return 2 * l + (threadIdx.x / 16);
+                if constexpr (std::is_same_v<T, float> || std::is_same_v<T, int>) {
+                    // matrix C
+                    return 2 * l + (threadIdx.x / 16);
+                } else {
+                    // matrix A&B
+                    return l;
+                }
 #else
+                // matrix C is the transposed matrix A&B on RDNA4
                 return ne * (threadIdx.x / 16) + l;
 #endif // defined(RDNA3)
             } else if constexpr (I == 16 && J == 8) {
@@ -462,11 +466,65 @@ namespace ggml_cuda_mma {
         }
     };
 
+    template <int I_, int J_, typename T>
+    struct tile<I_, J_, T, DATA_LAYOUT_I_MAJOR_MIRRORED> {
+        static constexpr int         I  = I_;
+        static constexpr int         J  = J_;
+        static constexpr data_layout dl = DATA_LAYOUT_I_MAJOR_MIRRORED;
+
+        // RDNA3
+        static constexpr int         ne = I * J / 32 * 2;
+
+        T x[ne] = {0};
+
+        static constexpr __device__ bool supported() {
+            if (I == 16 && J == 16) return true;
+            if (I == 16 && J == 8)  return true;
+            if (I == 16 && J == 4)  return true;
+            return false;
+        }
+
+        static __device__ __forceinline__ int get_i(const int /*l*/) {
+            if constexpr (supported()) {
+                return threadIdx.x % 16;
+            } else {
+                NO_DEVICE_CODE;
+                return -1;
+            }
+        }
+
+        static __device__ __forceinline__ int get_j(const int l) {
+            if constexpr (supported()) {
+                return l;
+            } else {
+                NO_DEVICE_CODE;
+                return -1;
+            }
+        }
+    };
+
     template <int I_, int J_>
     struct tile<I_, J_, half2, DATA_LAYOUT_I_MAJOR_MIRRORED> {
         static constexpr int         I  = I_;
         static constexpr int         J  = J_;
         static constexpr data_layout dl = DATA_LAYOUT_I_MAJOR_MIRRORED;
+#if defined(RDNA3)
+        static constexpr int         ne = tile<I_, J_, float, DATA_LAYOUT_I_MAJOR_MIRRORED>::ne;
+
+        half2 x[ne] = {{0.0f, 0.0f}};
+
+        static constexpr __device__ bool supported() {
+            return tile<I_, J_, float, DATA_LAYOUT_I_MAJOR_MIRRORED>::supported();
+        }
+
+        static __device__ __forceinline__ int get_i(const int l) {
+            return tile<I_, J_, float, DATA_LAYOUT_I_MAJOR_MIRRORED>::get_i(l);
+        }
+
+        static __device__ __forceinline__ int get_j(const int l) {
+            return tile<I_, J_, float, DATA_LAYOUT_I_MAJOR_MIRRORED>::get_j(l);
+        }
+#else // Volta
         static constexpr int         ne = I * J / (WARP_SIZE/4);
 
         half2 x[ne] = {{0.0f, 0.0f}};
@@ -492,6 +550,29 @@ namespace ggml_cuda_mma {
                 NO_DEVICE_CODE;
                 return -1;
             }
+        }
+#endif // defined(RDNA3)
+    };
+
+    template <int I_, int J_>
+    struct tile<I_, J_, nv_bfloat162, DATA_LAYOUT_I_MAJOR_MIRRORED> {
+        static constexpr int         I  = I_;
+        static constexpr int         J  = J_;
+        static constexpr data_layout dl = DATA_LAYOUT_I_MAJOR_MIRRORED;
+        static constexpr int         ne = tile<I_, J_, float, DATA_LAYOUT_I_MAJOR_MIRRORED>::ne;
+
+        nv_bfloat162 x[ne] = {{0.0f, 0.0f}};
+
+        static constexpr __device__ bool supported() {
+            return tile<I_, J_, float, DATA_LAYOUT_I_MAJOR_MIRRORED>::supported();
+        }
+
+        static __device__ __forceinline__ int get_i(const int l) {
+            return tile<I_, J_, float, DATA_LAYOUT_I_MAJOR_MIRRORED>::get_i(l);
+        }
+
+        static __device__ __forceinline__ int get_j(const int l) {
+            return tile<I_, J_, float, DATA_LAYOUT_I_MAJOR_MIRRORED>::get_j(l);
         }
     };
 
@@ -528,42 +609,6 @@ namespace ggml_cuda_mma {
         }
     };
 
-    template <int I_, int J_, typename T>
-    struct tile<I_, J_, T, DATA_LAYOUT_I_MAJOR_DUAL> {
-        static constexpr int         I  = I_;
-        static constexpr int         J  = J_;
-        static constexpr data_layout dl = DATA_LAYOUT_I_MAJOR_DUAL;
-
-        static constexpr int         ne = I * J / 32 * 2;
-
-        T x[ne] = {0};
-
-        static constexpr __device__ bool supported() {
-            if (I == 16 && J == 16) return true;
-            if (I == 16 && J == 8)  return true;
-            if (I == 16 && J == 4)  return true;
-            return false;
-        }
-
-        static __device__ __forceinline__ int get_i(const int l) {
-            if constexpr (supported()) {
-                return threadIdx.x % 16;
-            } else {
-                NO_DEVICE_CODE;
-                return -1;
-            }
-        }
-
-        static __device__ __forceinline__ int get_j(const int l) {
-            if constexpr (supported()) {
-                return l;
-            } else {
-                NO_DEVICE_CODE;
-                return -1;
-            }
-        }
-    };
-
 #if defined(TURING_MMA_AVAILABLE)
     template <int I, int J>
     static __device__ __forceinline__ tile<I, J/2, half2> get_half2(const tile<I, J, float> & tile_float) {
@@ -582,6 +627,21 @@ namespace ggml_cuda_mma {
 
         return ret;
     }
+#elif defined(AMD_WMMA_AVAILABLE)
+    template <int I, int J>
+    static __device__ __forceinline__ tile<I, J/2, half2> get_half2(const tile<I, J, float> & tile_float) {
+        tile<I, J/2, half2> ret;
+#pragma unroll
+        for (int l0 = 0; l0 < tile_float.ne; l0 += 2) {
+            ret.x[l0/2] = make_half2(tile_float.x[l0 + 0], tile_float.x[l0 + 1]);
+        }
+        return ret;
+    }
+
+    static __device__ __forceinline__ tile<8, 8, half2> get_transposed(const tile<16, 4, half2> & t) {
+        NO_DEVICE_CODE;
+        return tile<8, 8, half2>{};
+    }
 #else // Volta
     template <int I, int J>
     static __device__ __forceinline__ tile<I, J/2, half2> get_half2(const tile<I, J, float> & tile_float) {
@@ -599,6 +659,19 @@ namespace ggml_cuda_mma {
         return ret;
     }
 #endif // defined(TURING_MMA_AVAILABLE)
+
+    static __device__ __forceinline__ void make_identity_mat(tile<16, 8, half2> & t) {
+#if defined(RDNA4)
+        const int row = t.get_i(0);
+        const int left_right = t.get_j(0) / 4;
+        const int up_down = row / 8;
+        const int idx = row % 8;
+        reinterpret_cast<half*>(t.x)[idx] = left_right == up_down ? 1.0f : 0.0f;
+#else
+        GGML_UNUSED_VARS(t);
+        NO_DEVICE_CODE;
+#endif // defined(RDNA4)
+    }
 
     template <int I, int J, typename T, data_layout dl>
     static __device__ __forceinline__ void load_generic(tile<I, J, T, dl> & t, const T * __restrict__ xs0, const int stride) {
@@ -839,6 +912,17 @@ namespace ggml_cuda_mma {
             : "+r"(Dxi[2]), "+r"(Dxi[3])
             : "r"(Axi[2]), "r"(Axi[3]), "r"(Bxi[3]));
 #endif // __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
+#elif defined(AMD_WMMA_AVAILABLE)
+#if defined(RDNA4)
+        using halfx8_t = __attribute__((ext_vector_type(8))) _Float16;
+        halfx8_t& acc_frag = reinterpret_cast<halfx8_t&>(D.x[0]);
+        const halfx8_t& a_frag = reinterpret_cast<const halfx8_t&>(A.x[0]);
+        const halfx8_t& b_frag = reinterpret_cast<const halfx8_t&>(B.x[0]);
+        acc_frag = __builtin_amdgcn_wmma_f16_16x16x16_f16_w32_gfx12(a_frag, b_frag, acc_frag);
+#else
+        GGML_UNUSED_VARS(D, A, B);
+        NO_DEVICE_CODE;
+#endif // defined(RDNA4)
 #else
         GGML_UNUSED_VARS(D, A, B);
         NO_DEVICE_CODE;
@@ -859,6 +943,27 @@ namespace ggml_cuda_mma {
         GGML_UNUSED_VARS(D, A, B);
         NO_DEVICE_CODE;
 #endif // AMPERE_MMA_AVAILABLE
+    }
+
+    static __device__ __forceinline__ void mma_block_scaled(tile<16, 8, float> &     D,
+                                                            const tile<16, 8, int> & A,
+                                                            const tile<8, 8, int> &  B,
+                                                            uint32_t                 a_scale,
+                                                            uint32_t                 b_scale) {
+#ifdef BLACKWELL_MMA_AVAILABLE
+        const int * Axi = (const int *) A.x;
+        const int * Bxi = (const int *) B.x;
+        float *     Dxi = (float *) D.x;
+
+        asm volatile(
+            "mma.sync.aligned.kind::mxf4.block_scale.scale_vec::2X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue8m0 "
+            "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3}, "
+            "%10, {0, 0}, %11, {0, 0};"
+            : "+f"(Dxi[0]), "+f"(Dxi[1]), "+f"(Dxi[2]), "+f"(Dxi[3])
+            : "r"(Axi[0]), "r"(Axi[1]), "r"(Axi[2]), "r"(Axi[3]), "r"(Bxi[0]), "r"(Bxi[1]), "r"(a_scale), "r"(b_scale));
+#else
+        GGML_UNUSED_VARS(D, A, B, a_scale, b_scale);
+#endif  // BLACKWELL_MMA_AVAILABLE
     }
 
     static __device__ __forceinline__ void mma(
